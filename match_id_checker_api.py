@@ -5,15 +5,15 @@ import uvicorn
 import os
 import redis
 import json
-from dotenv import load_dotenv  # Import python-dotenv
+from dotenv import load_dotenv
 
-# Load environment variables from .env file (if present)
+# Load environment variables from .env file
 load_dotenv()
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Match ID Checker API",
-    description="API to check match ID status via MongoDB with status codes only",
+    description="API to check match ID status via MongoDB with API key authentication",
     version="1.0.0"
 )
 
@@ -38,6 +38,7 @@ class ClusterDetails(EmbeddedDocument):
     cluster_name = StringField(required=True)
     cluster_price = FloatField()
     cluster_timeline = StringField()
+    api_key = StringField(required=True, unique=True)
 
 class UserProfile(Document):
     user_id = StringField(required=True, unique=True)
@@ -49,26 +50,26 @@ class UserProfile(Document):
 
 class MatchId(Document):
     match_id = StringField(required=True, unique=True)
-    cluster_name = StringField(required=True)
+    api_key = StringField(required=True)
     timestamp = DateTimeField(required=True)
     days_valid = IntField(required=True)
     meta = {'collection': 'match_ids'}
 
-def get_cache_key(cluster: str, match_id: str) -> str:
-    return f"match_id:{cluster}:{match_id}"
+def get_cache_key(api_key: str, match_id: str) -> str:
+    return f"match_id:{api_key}:{match_id}"
 
 @app.get("/check-match-id/")
 async def check_match_id(
-    cluster: str = Query(..., description="The cluster name to check"),
+    api_key: str = Query(..., description="The API key associated with the cluster"),
     match_id: str = Query(..., description="The match ID to verify")
 ):
     """
     Check match ID status with Redis caching and return only status codes.
     """
-    if not cluster or not match_id:
+    if not api_key or not match_id:
         raise HTTPException(status_code=400)
 
-    cache_key = get_cache_key(cluster, match_id)
+    cache_key = get_cache_key(api_key, match_id)
     
     try:
         # Check Redis cache first
@@ -82,7 +83,7 @@ async def check_match_id(
                 return  # 200 OK from cache
             else:
                 # Check if status needs update
-                match_id_obj = MatchId.objects(match_id=match_id, cluster_name=cluster).first()
+                match_id_obj = MatchId.objects(match_id=match_id, api_key=api_key).first()
                 if match_id_obj:
                     expiry_date = match_id_obj.timestamp + timedelta(days=match_id_obj.days_valid)
                     is_active = datetime.now() < expiry_date
@@ -102,13 +103,13 @@ async def check_match_id(
         # Cache miss - fetch from MongoDB
         print(f"Cache miss for {cache_key}")
         
-        # Check if cluster exists
-        user = UserProfile.objects(clusters__cluster_name=cluster).first()
+        # Check if API key exists
+        user = UserProfile.objects(clusters__api_key=api_key).first()
         if not user:
             raise HTTPException(status_code=404)
         
         # Check match ID
-        match_id_obj = MatchId.objects(match_id=match_id, cluster_name=cluster).first()
+        match_id_obj = MatchId.objects(match_id=match_id, api_key=api_key).first()
         if not match_id_obj:
             raise HTTPException(status_code=422)
         
@@ -143,5 +144,5 @@ async def health_check():
         raise HTTPException(status_code=500)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))  # Use Render's PORT or default to 8000
+    port = int(os.getenv("PORT", 8000))
     uvicorn.run("match_id_checker_api:app", host="0.0.0.0", port=port, reload=True)
