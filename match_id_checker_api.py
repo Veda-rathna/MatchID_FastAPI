@@ -38,7 +38,7 @@ class ClusterDetails(EmbeddedDocument):
     cluster_name = StringField(required=True)
     cluster_price = FloatField()
     cluster_timeline = StringField()
-    api_key = StringField(required=True, unique=True)
+    api_key = StringField(required=True)
 
 class UserProfile(Document):
     user_id = StringField(required=True, unique=True)
