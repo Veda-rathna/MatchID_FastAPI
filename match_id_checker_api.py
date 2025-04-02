@@ -51,6 +51,7 @@ class UserProfile(Document):
 class MatchId(Document):
     match_id = StringField(required=True, unique=True)
     api_key = StringField(required=True)
+    cluster_name = StringField(required=True)
     timestamp = DateTimeField(required=True)
     days_valid = IntField(required=True)
     meta = {'collection': 'match_ids'}
