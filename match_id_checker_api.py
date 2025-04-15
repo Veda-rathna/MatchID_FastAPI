@@ -52,15 +52,36 @@ class UserProfile(Document):
 
 class MatchId(Document):
     match_id = StringField(required=True, unique=True)
-    api_key = StringField(required=True)
     cluster_name = StringField(required=True)
-    timestamp = DateTimeField(required=True)
-    days_valid = IntField(required=True)
+    created_on = DateTimeField(required=True)
+    last_paid_on = DateTimeField(default=None, null=True)
+    valid_till = DateTimeField(default=None, null=True)
     is_trial = BooleanField(default=False)
     meta = {'collection': 'match_ids'}
 
 def get_cache_key(api_key: str, match_id: str) -> str:
     return f"match_id:{api_key}:{match_id}"
+
+def _get_cluster_from_user(cluster_name: str, api_key: str = None):
+    """Retrieve cluster from UserProfile by cluster_name and optional api_key."""
+    user = UserProfile.objects(clusters__cluster_name=cluster_name).first()
+    if not user:
+        return None, None
+    cluster = next((c for c in user.clusters if c.cluster_name == cluster_name), None)
+    if not cluster and api_key:
+        # Fallback to Django Cluster model if MongoDB cluster not found
+        from .models import Cluster  # Dynamically import Django model
+        django_cluster = Cluster.objects.filter(cluster_name=cluster_name).first()
+        if django_cluster:
+            cluster = ClusterDetails(
+                cluster_name=django_cluster.cluster_name,
+                cluster_price=float(django_cluster.cluster_price),
+                timeline_days=django_cluster.timeline_days,
+                api_key=django_cluster.api_key,
+                match_id_type='admin_generated',
+                trial_period=django_cluster.trial_period
+            )
+    return user, cluster
 
 @app.get("/check-match-id/", status_code=status.HTTP_200_OK)
 async def check_match_id(
@@ -96,14 +117,15 @@ async def check_match_id(
                 else:
                     return {"status": "Paid Active"}, status.HTTP_200_OK
             else:
-                match_id_obj = MatchId.objects(match_id=match_id, api_key=api_key).first()
+                match_id_obj = MatchId.objects(match_id=match_id).first()
                 if match_id_obj:
-                    expiry_date = match_id_obj.timestamp + timedelta(days=match_id_obj.days_valid)
+                    user, cluster = _get_cluster_from_user(match_id_obj.cluster_name, api_key)
+                    if not cluster or cluster.api_key != api_key:
+                        raise HTTPException(status_code=404, detail="Invalid API key")
+                    expiry_date = match_id_obj.valid_till if match_id_obj.valid_till else match_id_obj.created_on + timedelta(days=match_id_obj.days_valid)
                     is_active = datetime.now() < expiry_date
-                    user = UserProfile.objects(clusters__api_key=api_key).first()
-                    cluster = next((c for c in user.clusters if c.cluster_name == match_id_obj.cluster_name), None) if user else None
                     trial_period = cluster.trial_period if cluster else 0
-                    trial_end_date = match_id_obj.timestamp + timedelta(days=trial_period) if trial_period > 0 else None
+                    trial_end_date = match_id_obj.created_on + timedelta(days=trial_period) if trial_period > 0 else None
                     
                     if is_active != data.get("is_active") or match_id_obj.is_trial != data.get("is_trial"):
                         cache_data = {
@@ -126,22 +148,21 @@ async def check_match_id(
         # Cache miss - fetch from MongoDB
         print(f"Cache miss for {cache_key}")
         
-        # Check if API key exists
-        user = UserProfile.objects(clusters__api_key=api_key).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="API key not found")
-        
         # Check match ID
-        match_id_obj = MatchId.objects(match_id=match_id, api_key=api_key).first()
+        match_id_obj = MatchId.objects(match_id=match_id).first()
         if not match_id_obj:
             raise HTTPException(status_code=422, detail="Match ID not found")
         
+        # Validate API key against cluster
+        user, cluster = _get_cluster_from_user(match_id_obj.cluster_name, api_key)
+        if not cluster or cluster.api_key != api_key:
+            raise HTTPException(status_code=404, detail="Invalid API key")
+        
         # Check if active
-        expiry_date = match_id_obj.timestamp + timedelta(days=match_id_obj.days_valid)
+        expiry_date = match_id_obj.valid_till if match_id_obj.valid_till else match_id_obj.created_on + timedelta(days=match_id_obj.days_valid)
         is_active = datetime.now() < expiry_date
-        cluster = next((c for c in user.clusters if c.cluster_name == match_id_obj.cluster_name), None)
         trial_period = cluster.trial_period if cluster else 0
-        trial_end_date = match_id_obj.timestamp + timedelta(days=trial_period) if trial_period > 0 else None
+        trial_end_date = match_id_obj.created_on + timedelta(days=trial_period) if trial_period > 0 else None
         
         # Store in cache (1 hour TTL)
         cache_data = {
