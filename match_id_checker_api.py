@@ -83,7 +83,7 @@ def _get_cluster_from_user(cluster_name: str, api_key: str = None):
             )
     return user, cluster
 
-@app.get("/check-match-id/", status_code=status.HTTP_200_OK)
+@app.get("/check-match-id/")
 async def check_match_id(
     api_key: str = Query(..., description="The API key associated with the cluster"),
     match_id: str = Query(..., description="The match ID to verify")
