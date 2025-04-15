@@ -1,5 +1,5 @@
-from fastapi import FastAPI, HTTPException, Query
-from mongoengine import connect, Document, StringField, IntField, DateTimeField, FloatField, EmbeddedDocument, EmbeddedDocumentListField, DictField
+from fastapi import FastAPI, HTTPException, Query, status
+from mongoengine import connect, Document, StringField, IntField, DateTimeField, FloatField, EmbeddedDocument, EmbeddedDocumentListField, DictField, BooleanField
 from datetime import datetime, timedelta
 import uvicorn
 import os
@@ -19,7 +19,7 @@ app = FastAPI(
 
 # MongoDB connection
 MONGODB_URI = os.getenv("MONGODB_DATABASE_URL")
-if not MONGODB_URI:
+if MONGODB_URI is None:
     raise ValueError("MONGODB_DATABASE_URL is not set in environment variables")
 connect(host=MONGODB_URI)
 
@@ -54,21 +54,29 @@ class MatchId(Document):
     cluster_name = StringField(required=True)
     timestamp = DateTimeField(required=True)
     days_valid = IntField(required=True)
+    is_trial = BooleanField(default=False)
     meta = {'collection': 'match_ids'}
 
 def get_cache_key(api_key: str, match_id: str) -> str:
     return f"match_id:{api_key}:{match_id}"
 
-@app.get("/check-match-id/")
+@app.get("/check-match-id/", status_code=status.HTTP_200_OK)
 async def check_match_id(
     api_key: str = Query(..., description="The API key associated with the cluster"),
     match_id: str = Query(..., description="The match ID to verify")
 ):
     """
-    Check match ID status with Redis caching and return only status codes.
+    Check match ID status with Redis caching.
+    Returns:
+    - 200 OK: Paid Active
+    - 201 Created: Trial Active
+    - 404: API key not found
+    - 410: Match ID expired
+    - 422: Match ID not found
+    - 500: Server error
     """
-    if not api_key or not match_id:
-        raise HTTPException(status_code=400)
+    if api_key is None or match_id is None:
+        raise HTTPException(status_code=400, detail="API key and match ID are required")
 
     cache_key = get_cache_key(api_key, match_id)
     
@@ -76,63 +84,72 @@ async def check_match_id(
         # Check Redis cache first
         cached_data = redis_client.get(cache_key)
         
-        if cached_data:
+        if cached_data is not None:
             data = json.loads(cached_data)
             print(f"Cache hit for {cache_key}")
             
             if data["is_active"]:
-                return  # 200 OK from cache
+                if data["is_trial"]:
+                    return {}, status.HTTP_201_CREATED
+                else:
+                    return {}, status.HTTP_200_OK
             else:
                 # Check if status needs update
                 match_id_obj = MatchId.objects(match_id=match_id, api_key=api_key).first()
-                if match_id_obj:
+                if match_id_obj is not None:
                     expiry_date = match_id_obj.timestamp + timedelta(days=match_id_obj.days_valid)
                     is_active = datetime.now() < expiry_date
                     
-                    if is_active != data["is_active"]:
+                    if is_active != data["is_active"] or match_id_obj.is_trial != data["is_trial"]:
                         # Update cache if status changed
-                        cache_data = {"is_active": is_active}
+                        cache_data = {"is_active": is_active, "is_trial": match_id_obj.is_trial}
                         redis_client.setex(cache_key, 3600, json.dumps(cache_data))
                         print(f"Cache updated for {cache_key}")
                     
                     if is_active:
-                        return  # 200 OK
+                        if match_id_obj.is_trial:
+                            return {}, status.HTTP_201_CREATED
+                        else:
+                            return {}, status.HTTP_200_OK
                     else:
-                        raise HTTPException(status_code=410)
-                raise HTTPException(status_code=422)
+                        raise HTTPException(status_code=410, detail="Match ID expired")
+                raise HTTPException(status_code=422, detail="Match ID not found")
         
         # Cache miss - fetch from MongoDB
         print(f"Cache miss for {cache_key}")
         
         # Check if API key exists
         user = UserProfile.objects(clusters__api_key=api_key).first()
-        if not user:
-            raise HTTPException(status_code=404)
+        if user is None:
+            raise HTTPException(status_code=404, detail="API key not found")
         
         # Check match ID
         match_id_obj = MatchId.objects(match_id=match_id, api_key=api_key).first()
-        if not match_id_obj:
-            raise HTTPException(status_code=422)
+        if match_id_obj is None:
+            raise HTTPException(status_code=422, detail="Match ID not found")
         
         # Check if active
         expiry_date = match_id_obj.timestamp + timedelta(days=match_id_obj.days_valid)
         is_active = datetime.now() < expiry_date
         
         # Store in cache (1 hour TTL)
-        cache_data = {"is_active": is_active}
+        cache_data = {"is_active": is_active, "is_trial": match_id_obj.is_trial}
         redis_client.setex(cache_key, 3600, json.dumps(cache_data))
         print(f"Cache set for {cache_key}")
         
         if is_active:
-            return  # 200 OK
+            if match_id_obj.is_trial:
+                return {}, status.HTTP_201_CREATED
+            else:
+                return {}, status.HTTP_200_OK
         else:
-            raise HTTPException(status_code=410)
+            raise HTTPException(status_code=410, detail="Match ID expired")
             
     except HTTPException as e:
         raise e
     except Exception as e:
         print(f"Error processing request: {str(e)}")
-        raise HTTPException(status_code=500)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/health/")
 async def health_check():
@@ -142,7 +159,7 @@ async def health_check():
         redis_client.ping()
         return  # 200 OK
     except Exception:
-        raise HTTPException(status_code=500)
+        raise HTTPException(status_code=500, detail="Health check failed")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
