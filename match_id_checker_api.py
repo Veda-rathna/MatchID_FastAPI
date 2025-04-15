@@ -37,8 +37,10 @@ redis_client = redis.Redis(
 class ClusterDetails(EmbeddedDocument):
     cluster_name = StringField(required=True)
     cluster_price = FloatField()
-    cluster_timeline = StringField()
+    timeline_days = IntField(min_value=1, max_value=30, default=30)
     api_key = StringField(required=True)
+    match_id_type = StringField(default="admin_generated", choices=["admin_generated", "user_created"])
+    trial_period = IntField(min_value=0, max_value=7, default=0)
 
 class UserProfile(Document):
     user_id = StringField(required=True, unique=True)
@@ -88,29 +90,36 @@ async def check_match_id(
             data = json.loads(cached_data)
             print(f"Cache hit for {cache_key}")
             
-            if data["is_active"]:
-                if data["is_trial"]:
-                    return {}, status.HTTP_201_CREATED
+            if data.get("is_active"):
+                if data.get("is_trial"):
+                    return {"status": "Trial Active"}, status.HTTP_201_CREATED
                 else:
-                    return {}, status.HTTP_200_OK
+                    return {"status": "Paid Active"}, status.HTTP_200_OK
             else:
                 # Check if status needs update
                 match_id_obj = MatchId.objects(match_id=match_id, api_key=api_key).first()
                 if match_id_obj is not None:
                     expiry_date = match_id_obj.timestamp + timedelta(days=match_id_obj.days_valid)
                     is_active = datetime.now() < expiry_date
+                    cluster = UserProfile.objects(clusters__api_key=api_key).first().clusters[0] if UserProfile.objects(clusters__api_key=api_key).first() else None
+                    trial_period = cluster.trial_period if cluster else 0
+                    trial_end_date = match_id_obj.timestamp + timedelta(days=trial_period) if trial_period > 0 else None
                     
-                    if is_active != data["is_active"] or match_id_obj.is_trial != data["is_trial"]:
+                    if is_active != data.get("is_active") or match_id_obj.is_trial != data.get("is_trial"):
                         # Update cache if status changed
-                        cache_data = {"is_active": is_active, "is_trial": match_id_obj.is_trial}
+                        cache_data = {
+                            "is_active": is_active,
+                            "is_trial": match_id_obj.is_trial,
+                            "status": "Trial Active" if is_active and match_id_obj.is_trial and datetime.now() <= trial_end_date else "Paid Active" if is_active else "Inactive"
+                        }
                         redis_client.setex(cache_key, 3600, json.dumps(cache_data))
                         print(f"Cache updated for {cache_key}")
                     
                     if is_active:
-                        if match_id_obj.is_trial:
-                            return {}, status.HTTP_201_CREATED
+                        if match_id_obj.is_trial and datetime.now() <= trial_end_date:
+                            return {"status": "Trial Active"}, status.HTTP_201_CREATED
                         else:
-                            return {}, status.HTTP_200_OK
+                            return {"status": "Paid Active"}, status.HTTP_200_OK
                     else:
                         raise HTTPException(status_code=410, detail="Match ID expired")
                 raise HTTPException(status_code=422, detail="Match ID not found")
@@ -131,17 +140,24 @@ async def check_match_id(
         # Check if active
         expiry_date = match_id_obj.timestamp + timedelta(days=match_id_obj.days_valid)
         is_active = datetime.now() < expiry_date
+        cluster = next((c for c in user.clusters if c.api_key == api_key), None)
+        trial_period = cluster.trial_period if cluster else 0
+        trial_end_date = match_id_obj.timestamp + timedelta(days=trial_period) if trial_period > 0 else None
         
         # Store in cache (1 hour TTL)
-        cache_data = {"is_active": is_active, "is_trial": match_id_obj.is_trial}
+        cache_data = {
+            "is_active": is_active,
+            "is_trial": match_id_obj.is_trial,
+            "status": "Trial Active" if is_active and match_id_obj.is_trial and datetime.now() <= trial_end_date else "Paid Active" if is_active else "Inactive"
+        }
         redis_client.setex(cache_key, 3600, json.dumps(cache_data))
         print(f"Cache set for {cache_key}")
         
         if is_active:
-            if match_id_obj.is_trial:
-                return {}, status.HTTP_201_CREATED
+            if match_id_obj.is_trial and datetime.now() <= trial_end_date:
+                return {"status": "Trial Active"}, status.HTTP_201_CREATED
             else:
-                return {}, status.HTTP_200_OK
+                return {"status": "Paid Active"}, status.HTTP_200_OK
         else:
             raise HTTPException(status_code=410, detail="Match ID expired")
             
