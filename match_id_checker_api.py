@@ -77,7 +77,7 @@ async def check_match_id(
     - 422: Match ID not found
     - 500: Server error
     """
-    if api_key is None or match_id is None:
+    if not api_key or not match_id:
         raise HTTPException(status_code=400, detail="API key and match ID are required")
 
     cache_key = get_cache_key(api_key, match_id)
@@ -96,17 +96,16 @@ async def check_match_id(
                 else:
                     return {"status": "Paid Active"}, status.HTTP_200_OK
             else:
-                # Check if status needs update
                 match_id_obj = MatchId.objects(match_id=match_id, api_key=api_key).first()
-                if match_id_obj is not None:
+                if match_id_obj:
                     expiry_date = match_id_obj.timestamp + timedelta(days=match_id_obj.days_valid)
                     is_active = datetime.now() < expiry_date
-                    cluster = UserProfile.objects(clusters__api_key=api_key).first().clusters[0] if UserProfile.objects(clusters__api_key=api_key).first() else None
+                    user = UserProfile.objects(clusters__api_key=api_key).first()
+                    cluster = next((c for c in user.clusters if c.cluster_name == match_id_obj.cluster_name), None) if user else None
                     trial_period = cluster.trial_period if cluster else 0
                     trial_end_date = match_id_obj.timestamp + timedelta(days=trial_period) if trial_period > 0 else None
                     
                     if is_active != data.get("is_active") or match_id_obj.is_trial != data.get("is_trial"):
-                        # Update cache if status changed
                         cache_data = {
                             "is_active": is_active,
                             "is_trial": match_id_obj.is_trial,
@@ -129,18 +128,18 @@ async def check_match_id(
         
         # Check if API key exists
         user = UserProfile.objects(clusters__api_key=api_key).first()
-        if user is None:
+        if not user:
             raise HTTPException(status_code=404, detail="API key not found")
         
         # Check match ID
         match_id_obj = MatchId.objects(match_id=match_id, api_key=api_key).first()
-        if match_id_obj is None:
+        if not match_id_obj:
             raise HTTPException(status_code=422, detail="Match ID not found")
         
         # Check if active
         expiry_date = match_id_obj.timestamp + timedelta(days=match_id_obj.days_valid)
         is_active = datetime.now() < expiry_date
-        cluster = next((c for c in user.clusters if c.api_key == api_key), None)
+        cluster = next((c for c in user.clusters if c.cluster_name == match_id_obj.cluster_name), None)
         trial_period = cluster.trial_period if cluster else 0
         trial_end_date = match_id_obj.timestamp + timedelta(days=trial_period) if trial_period > 0 else None
         
