@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from mongoengine import connect, Document, StringField, IntField, DateTimeField, FloatField, EmbeddedDocument, EmbeddedDocumentListField, DictField, BooleanField
 from datetime import datetime, timedelta
 import uvicorn
@@ -113,9 +114,9 @@ async def check_match_id(
             
             if data.get("is_active"):
                 if data.get("is_trial"):
-                    return {"status": "Trial Active"}, status.HTTP_201_CREATED
+                    return JSONResponse(content={"status": "Trial Active"}, status_code=status.HTTP_201_CREATED)
                 else:
-                    return {"status": "Paid Active"}, status.HTTP_200_OK
+                    return JSONResponse(content={"status": "Paid Active"}, status_code=status.HTTP_200_OK)
             else:
                 match_id_obj = MatchId.objects(match_id=match_id).first()
                 if match_id_obj:
@@ -138,9 +139,9 @@ async def check_match_id(
                     
                     if is_active:
                         if match_id_obj.is_trial and datetime.now() <= trial_end_date:
-                            return {"status": "Trial Active"}, status.HTTP_201_CREATED
+                            return JSONResponse(content={"status": "Trial Active"}, status_code=status.HTTP_201_CREATED)
                         else:
-                            return {"status": "Paid Active"}, status.HTTP_200_OK
+                            return JSONResponse(content={"status": "Paid Active"}, status_code=status.HTTP_200_OK)
                     else:
                         raise HTTPException(status_code=410, detail="Match ID expired")
                 raise HTTPException(status_code=422, detail="Match ID not found")
@@ -175,9 +176,9 @@ async def check_match_id(
         
         if is_active:
             if match_id_obj.is_trial and datetime.now() <= trial_end_date:
-                return {"status": "Trial Active"}, status.HTTP_201_CREATED
+                return JSONResponse(content={"status": "Trial Active"}, status_code=status.HTTP_201_CREATED)
             else:
-                return {"status": "Paid Active"}, status.HTTP_200_OK
+                return JSONResponse(content={"status": "Paid Active"}, status_code=status.HTTP_200_OK)
         else:
             raise HTTPException(status_code=410, detail="Match ID expired")
             
