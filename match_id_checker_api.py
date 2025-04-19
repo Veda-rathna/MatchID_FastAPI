@@ -84,6 +84,23 @@ def _get_cluster_from_user(cluster_name: str, api_key: str = None):
             )
     return user, cluster
 
+def serialize_match_id(match_id_obj):
+    """Serialize MatchId object to dictionary, excluding _id field"""
+    if not match_id_obj:
+        return None
+    
+    # Convert to dict and handle datetime objects
+    match_id_dict = {
+        "match_id": match_id_obj.match_id,
+        "cluster_name": match_id_obj.cluster_name,
+        "created_on": match_id_obj.created_on.isoformat() if match_id_obj.created_on else None,
+        "last_paid_on": match_id_obj.last_paid_on.isoformat() if match_id_obj.last_paid_on else None,
+        "valid_till": match_id_obj.valid_till.isoformat() if match_id_obj.valid_till else None,
+        "is_trial": match_id_obj.is_trial
+    }
+    
+    return match_id_dict
+
 @app.get("/check-match-id/")
 async def check_match_id(
     api_key: str = Query(..., description="The API key associated with the cluster"),
@@ -112,39 +129,37 @@ async def check_match_id(
             data = json.loads(cached_data)
             print(f"Cache hit for {cache_key}")
             
-            if data.get("is_active"):
-                if data.get("is_trial"):
+            # Determine status based on cached data
+            is_active = False
+            is_trial = data.get("is_trial", False)
+            
+            # Convert ISO strings back to datetime objects for comparison
+            created_on = datetime.fromisoformat(data.get("created_on")) if data.get("created_on") else None
+            valid_till = datetime.fromisoformat(data.get("valid_till")) if data.get("valid_till") else None
+            
+            # Get cluster details to determine trial period
+            user, cluster = _get_cluster_from_user(data.get("cluster_name"), api_key)
+            if not cluster or cluster.api_key != api_key:
+                raise HTTPException(status_code=404, detail="Invalid API key")
+            
+            # Check if match ID is active
+            if valid_till and datetime.now() < valid_till:
+                is_active = True
+            
+            # Check if in trial period
+            trial_period = cluster.trial_period if cluster else 0
+            in_trial = False
+            if is_trial and created_on and trial_period > 0:
+                trial_end_date = created_on + timedelta(days=trial_period)
+                in_trial = datetime.now() <= trial_end_date
+            
+            if is_active:
+                if is_trial and in_trial:
                     return JSONResponse(content={"status": "Trial Active"}, status_code=status.HTTP_201_CREATED)
                 else:
                     return JSONResponse(content={"status": "Paid Active"}, status_code=status.HTTP_200_OK)
             else:
-                match_id_obj = MatchId.objects(match_id=match_id).first()
-                if match_id_obj:
-                    user, cluster = _get_cluster_from_user(match_id_obj.cluster_name, api_key)
-                    if not cluster or cluster.api_key != api_key:
-                        raise HTTPException(status_code=404, detail="Invalid API key")
-                    expiry_date = match_id_obj.valid_till if match_id_obj.valid_till else match_id_obj.created_on + timedelta(days=match_id_obj.days_valid)
-                    is_active = datetime.now() < expiry_date
-                    trial_period = cluster.trial_period if cluster else 0
-                    trial_end_date = match_id_obj.created_on + timedelta(days=trial_period) if trial_period > 0 else None
-                    
-                    if is_active != data.get("is_active") or match_id_obj.is_trial != data.get("is_trial"):
-                        cache_data = {
-                            "is_active": is_active,
-                            "is_trial": match_id_obj.is_trial,
-                            "status": "Trial Active" if is_active and match_id_obj.is_trial and datetime.now() <= trial_end_date else "Paid Active" if is_active else "Inactive"
-                        }
-                        redis_client.setex(cache_key, 3600, json.dumps(cache_data))
-                        print(f"Cache updated for {cache_key}")
-                    
-                    if is_active:
-                        if match_id_obj.is_trial and datetime.now() <= trial_end_date:
-                            return JSONResponse(content={"status": "Trial Active"}, status_code=status.HTTP_201_CREATED)
-                        else:
-                            return JSONResponse(content={"status": "Paid Active"}, status_code=status.HTTP_200_OK)
-                    else:
-                        raise HTTPException(status_code=410, detail="Match ID expired")
-                raise HTTPException(status_code=422, detail="Match ID not found")
+                raise HTTPException(status_code=410, detail="Match ID expired")
         
         # Cache miss - fetch from MongoDB
         print(f"Cache miss for {cache_key}")
@@ -160,22 +175,21 @@ async def check_match_id(
             raise HTTPException(status_code=404, detail="Invalid API key")
         
         # Check if active
-        expiry_date = match_id_obj.valid_till if match_id_obj.valid_till else match_id_obj.created_on + timedelta(days=match_id_obj.days_valid)
-        is_active = datetime.now() < expiry_date
+        expiry_date = match_id_obj.valid_till if match_id_obj.valid_till else None
+        is_active = expiry_date and datetime.now() < expiry_date
         trial_period = cluster.trial_period if cluster else 0
-        trial_end_date = match_id_obj.created_on + timedelta(days=trial_period) if trial_period > 0 else None
+        in_trial = False
+        if match_id_obj.is_trial and trial_period > 0:
+            trial_end_date = match_id_obj.created_on + timedelta(days=trial_period)
+            in_trial = datetime.now() <= trial_end_date
         
-        # Store in cache (1 hour TTL)
-        cache_data = {
-            "is_active": is_active,
-            "is_trial": match_id_obj.is_trial,
-            "status": "Trial Active" if is_active and match_id_obj.is_trial and datetime.now() <= trial_end_date else "Paid Active" if is_active else "Inactive"
-        }
+        # Store all fields except _id in cache (1 hour TTL)
+        cache_data = serialize_match_id(match_id_obj)
         redis_client.setex(cache_key, 3600, json.dumps(cache_data))
         print(f"Cache set for {cache_key}")
         
         if is_active:
-            if match_id_obj.is_trial and datetime.now() <= trial_end_date:
+            if match_id_obj.is_trial and in_trial:
                 return JSONResponse(content={"status": "Trial Active"}, status_code=status.HTTP_201_CREATED)
             else:
                 return JSONResponse(content={"status": "Paid Active"}, status_code=status.HTTP_200_OK)
